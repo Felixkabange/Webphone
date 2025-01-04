@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <title>Web Phone</title>
+    <script src="//sdk.twilio.com/js/client/releases/1.13.0/twilio.min.js"></script>
+    <style>
+        /* Existing styles */
+        .dial-pad {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            max-width: 200px;
+            margin: 20px auto;
+        }
+        .dial-pad button {
+            font-size: 20px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.1s ease;  /* Added smooth transition */
+            touch-action: manipulation;  /* Optimize for touch */
+            -webkit-tap-highlight-color: transparent;  /* Remove tap highlight on mobile */
+        }
+        .dial-pad button:active {
+            background-color: #d0d0d0;  /* Darker color when pressed */
+            transform: scale(0.95);  /* Slight scale effect */
+        }
+        .dial-pad button:hover {
+            background-color: #e0e0e0;
+        }
+        /* Rest of your existing styles remain the same */
+        #call-status {
+            margin-top: 20px;
+            font-size: 18px;
+            text-align: center;
+        }
+        #phone-number {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .call-controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .call-button {
+            padding: 10px 20px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .call-button.start {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+        }
+        .call-button.hangup {
+            background-color: #f44336;
+            color: white;
+            border: none;
+            display: none;
+        }
+        #phone-number-input {
+            font-size: 1.5em;
+            padding: 10px;
+            width: 200px;
+            text-align: center;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- Your existing HTML structure remains the same -->
+    <h1>Web Phone Dial Pad</h1>
+
+    <div id="call-status">Status: Waiting for updates...</div>
+
+    <audio id="remote-audio" autoplay></audio>
+
+    <div id="phone-number">
+        <input type="text" id="phone-number-input" name="phone_number" placeholder="Enter phone number" >
+    </div>
+
+    <div class="dial-pad" id="dialpad">
+        <button data-value="+">+</button>
+        <button data-value="1">1</button>
+        <button data-value="2">2</button>
+        <button data-value="3">3</button>
+        <button data-value="4">4</button>
+        <button data-value="5">5</button>
+        <button data-value="6">6</button>
+        <button data-value="7">7</button>
+        <button data-value="8">8</button>
+        <button data-value="9">9</button>
+        <button data-value="*">*</button>
+        <button data-value="0">0</button>
+        <button data-value="#">#</button>
+        <button id="backspace">←</button>
+    </div>
+
+    <div class="call-controls">
+        <button class="call-button start" id="call-button">Call</button>
+        <button class="call-button hangup" id="hangup-button">Hang Up</button>
+    </div>
+
+    <script>
+        let device;
+        let deviceReady = false;
+        let currentConnection = null;
+        
+        // Cache DOM elements
+        const phoneInput = document.getElementById('phone-number-input');
+        const dialpad = document.getElementById('dialpad');
+        const callStatus = document.getElementById('call-status');
+        const hangupButton = document.getElementById('hangup-button');
+        const callButton = document.getElementById('call-button');
+        const remoteAudio = document.getElementById('remote-audio');
+        
+        let callSid = null;
+        let statusCheckInterval = null;
+        let localStream = null;
+        
+        // Initialize Twilio Device
+        async function setupTwilioDevice() {
+            try {
+                // Request microphone access
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                    },
+                    video: false,
+                });
+        
+                console.log('Microphone access granted.');
+        
+                // Fetch the Twilio token from the backend
+                const response = await fetch('/get-twilio-token/');
+                if (!response.ok) throw new Error('Failed to fetch Twilio token');
+                const data = await response.json();
+        
+                // Configure Twilio.Device
+                device = new Twilio.Device(data.token, {
+                    debug: true,
+                    enableRingingState: true,
+                    sounds: {
+                        incoming: true,
+                        outgoing: true,
+                        disconnect: true,
+                    },
+                });
+        
+                // Handle device events
+                device.on('ready', () => {
+                    console.log('Twilio Device is ready');
+                    deviceReady = true;
+                    callButton.disabled = false;
+                    callStatus.innerText = 'Status: Ready to make calls';
+                });
+        
+                device.on('error', (error) => {
+                    console.error('Twilio Device error:', error);
+                    callStatus.innerText = `Device error: ${error.message}`;
+                });
+        
+                device.on('connect', (connection) => {
+                    console.log('Call connected');
+                    callStatus.innerText = 'Call connected';
+                    currentConnection = connection;
+        
+                    connection.on('warning', (warning) => {
+                        console.log('Call warning:', warning);
+                        callStatus.innerText = 'Connection quality warning...';
+                    });
+        
+                    connection.on('warning-cleared', () => {
+                        callStatus.innerText = 'Call connected';
+                    });
+        
+                    connection.on('error', (error) => {
+                        console.error('Call error:', error);
+                        callStatus.innerText = `Error during call: ${error.message}`;
+                    });
+                });
+        
+                device.on('disconnect', () => {
+                    console.log('Call ended');
+                    callStatus.innerText = 'Call ended';
+                    resetUI();
+                });
+            } catch (error) {
+                console.error('Error setting up Twilio device:', error);
+                callStatus.innerText = `Error: ${error.message}`;
+            }
+        }
+        
+        function resetUI() {
+            currentConnection = null;
+            hangupButton.style.display = 'none';
+            callButton.style.display = 'block';
+            if (localStream) {
+                localStream.getTracks().forEach((track) => track.stop());
+                localStream = null;
+            }
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+                statusCheckInterval = null;
+            }
+        }
+        
+        async function startCall(event) {
+            if (event) event.preventDefault();
+            
+            if (!device || !deviceReady) {
+                callStatus.innerText = "Device not ready. Please wait...";
+                return;
+            }
+            
+            const phoneNumber = phoneInput.value;
+            if (!phoneNumber) {
+                alert("Please enter a phone number.");
+                return;
+            }
+
+            try {
+                // Ensure we have microphone access before making the call
+                if (!localStream) {
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        },
+                        video: false
+                    });
+                }
+
+                // Update UI first
+                callStatus.innerText = "Connecting call...";
+                callButton.style.display = 'none';
+                hangupButton.style.display = 'block';
+                
+                // Connect the call with specific parameters
+                const connection = await device.connect({
+                    To: phoneNumber,
+                    params: {
+                        // Tell Twilio to use the client's microphone
+                        FromNumber: phoneNumber,
+                        // Ensure the call uses the local audio stream
+                        rtcConfiguration: {
+                            iceServers: [{
+                                urls: 'stun:global.stun.twilio.com:3478'
+                            }]
+                        }
+                    }
+                });
+
+                // Add CSRF token in the headers of the request to your backend
+                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;  // Make sure the CSRF token is in the form
+
+                const response = await fetch('/call/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': csrfToken,  // Add the CSRF token here
+                    },
+                    body: JSON.stringify({ 
+                        phone_number: phoneNumber,
+                        // Add any additional parameters needed for your backend
+                        use_client_audio: true
+                    }),
+                });
+                
+                const data = await response.json();
+                
+                if (data.sid) {
+                    callSid = data.sid;
+                    statusCheckInterval = setInterval(checkCallStatus, 5000);
+                } else if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+            } catch (error) {
+                console.error('Error making call:', error);
+                callStatus.innerText = `Error: ${error.message}`;
+                hangupButton.style.display = 'none';
+                callButton.style.display = 'block';
+                if (localStream) {
+                    localStream.getTracks().forEach(track => track.stop());
+                    localStream = null;
+                }
+            }
+        }
+        
+        function hangupCall() {
+            if (currentConnection) {
+                currentConnection.disconnect();
+            }
+        
+            if (device) {
+                device.disconnectAll();
+            }
+        
+            if (callSid) {
+                fetch('/hangup/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': '{{ csrf_token }}',
+                    },
+                    body: JSON.stringify({ call_sid: callSid }),
+                })
+                    .then(() => {
+                        callStatus.innerText = 'Call ended';
+                        resetUI();
+                    })
+                    .catch((error) => {
+                        console.error('Error hanging up call:', error);
+                        callStatus.innerText = 'Error ending call';
+                    });
+            } else {
+                resetUI();
+            }
+        }
+
+        function checkCallStatus() {
+        // Make a request to your backend to get the current status of the call
+        fetch(`/call-status/${callSid}/`)  // Modify the URL as per your backend endpoint
+            .then((response) => response.json())
+            .then((data) => {
+                if (data.status === 'completed') {
+                    callStatus.innerText = 'Call completed';
+                    clearInterval(statusCheckInterval);
+                } else {
+                    callStatus.innerText = `Call status: ${data.status}`;
+                }
+            })
+            .catch((error) => {
+                console.error('Error checking call status:', error);
+            });
+    }
+            
+        // Initialize when the DOM is ready
+        document.addEventListener('DOMContentLoaded', () => {
+            setupTwilioDevice();
+        
+            dialpad.addEventListener('click', (e) => {
+                const button = e.target;
+                if (button.tagName === 'BUTTON') {
+                    if (button.id === 'backspace') {
+                        phoneInput.value = phoneInput.value.slice(0, -1);
+                    } else {
+                        phoneInput.value += button.dataset.value;
+                    }
+                }
+            });
+        
+            callButton.addEventListener('click', startCall);
+            hangupButton.addEventListener('click', hangupCall);
+        
+            phoneInput.addEventListener('input', function () {
+                this.value = this.value.replace(/[^0-9+*#]/g, '');
+            });
+        });
+        </script>
+</body>
+</html>
